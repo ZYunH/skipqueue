@@ -5,6 +5,7 @@ import (
 	"math/rand"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/ZYunH/lockedsource"
 )
@@ -49,7 +50,7 @@ func (s *SkipQueue) randomLevel() int {
 	level := 1
 
 	for s.rnd.Float64() < s.p {
-		level ++
+		level++
 	}
 
 	if level > s.maxLevel {
@@ -90,9 +91,8 @@ func (s *SkipQueue) Insert(score int64, val string) *Node {
 		s.level = level
 	}
 
-	// Insert the new node into skiplist.
+	// Insert the new node.
 	nn := newNode(level, score, val)
-	// nn.timestamp = math.MaxInt64
 
 	// Lock entire new node.
 	for i := 0; i < level; i++ {
@@ -114,8 +114,75 @@ func (s *SkipQueue) Insert(score int64, val string) *Node {
 	}
 
 	atomic.AddInt64(&s.length, 1)
-	// nn.timestamp = time.Now().UnixNano()
+	nn.timestamp = time.Now().UnixNano()
 	return n
+}
+
+// key == score, val == val, comparisons are done on the key, the value is just the stored item.
+func (s *SkipQueue) DeleteMin() (string, bool) {
+	now := time.Now().UnixNano()
+
+	// Try to find an existing node.
+	n := s.header.levels[0].next
+	for n != nil {
+		if n.timestamp < now {
+			if atomic.CompareAndSwapUint32(&n.deleted, 0, 1) {
+				break
+			}
+		}
+		n = n.levels[0].next
+	}
+
+	if n == nil { // can not find an existing node for now
+		return "", false
+	}
+	score, val := n.score, n.val
+
+	// Search update path for this node.
+	update := make([]*Node, s.maxLevel)
+	n = s.header
+	for i := s.maxLevel - 1; i >= 0; i-- {
+		for n.levels[i].next != nil && n.levels[i].next.score < score {
+			n = n.levels[i].next
+		}
+		update[i] = n
+	}
+
+	// Make sure we have a pointer to the node(the score could be repeat).
+	n = n.levels[0].next
+	for n.val != val {
+		n = n.levels[0].next
+	}
+
+	// Lock entire node.
+	for i := 0; i < len(n.levels); i++ {
+		n.levels[i].mu.Lock()
+	}
+
+	// n is the node to be deleted.
+	for i := len(n.levels) - 1; i >= 0; i-- {
+		pn := getLock(update[i], score, i) // lock the previous node
+		pn.levels[i].next = n.levels[i].next
+		n.levels[i].next = pn
+		n.levels[i].mu.Unlock()  // unlock the deleted node
+		pn.levels[i].mu.Unlock() // and the previous node
+	}
+	return val, true
+}
+
+func (s *SkipQueue) print() {
+	for i := s.level - 1; i >= 0; i-- {
+		print(i, " ")
+		x := s.header.levels[i].next
+
+		for x != nil {
+			print("[val:", x.val, " score:", x.score, " deleted:", x.deleted, "] -> ")
+			x = x.levels[i].next
+		}
+		print("nil")
+		print("\r\n")
+	}
+	print("\r\n")
 }
 
 type Node struct {
@@ -133,9 +200,11 @@ type _nodeLevel struct {
 
 func newNode(level int, score int64, val string) *Node {
 	return &Node{
-		val:    val,
-		score:  score,
-		levels: make([]_nodeLevel, level),
+		val:       val,
+		score:     score,
+		deleted:   0,
+		timestamp: math.MaxInt64,
+		levels:    make([]_nodeLevel, level),
 	}
 }
 
