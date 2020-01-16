@@ -3,13 +3,31 @@ package skipqueue
 import (
 	"math/rand"
 	"strconv"
+	"sync"
 	"testing"
 )
 
+func checkNode(t *testing.T, score int64, val string, n *Node) {
+	if score != n.score || val != n.val {
+		t.Fatalf("expected %v `%v`, got %v `%v`", score, val, n.score, n.val)
+	}
+}
+
 func TestSkipQueue_All(t *testing.T) {
-	// Test random insert and delete.
+	// Test simple insert.
 	s := NewDefault()
-	insertItemsArray := insertItems(10000)
+	node1 := s.Insert(1, "1")
+	checkNode(t, 1, "1", node1)
+
+	node2 := s.Insert(2, "2")
+	checkNode(t, 2, "2", node2)
+	if node1.levels[0].next != node2 {
+		t.Fatalf("invalid priority")
+	}
+
+	// Test random insert and delete.
+	s = NewDefault()
+	insertItemsArray := insertItems(100000)
 	for i := 0; i < len(insertItemsArray); i++ {
 		s.Insert(insertItemsArray[i].score, insertItemsArray[i].val)
 	}
@@ -19,6 +37,25 @@ func TestSkipQueue_All(t *testing.T) {
 			t.Fatalf("invalid numbers expected:%v ok:%v val:%v", i, ok, v)
 		}
 	}
+
+	// Test concurrent.
+	s = NewDefault()
+	var wg sync.WaitGroup
+	wg.Add(len(insertItemsArray))
+	for i := 0; i < len(insertItemsArray); i++ {
+		if rand.Intn(3) == 0 {
+			go func() {
+				s.DeleteMin()
+				wg.Done()
+			}()
+		} else {
+			go func(i int) {
+				s.Insert(insertItemsArray[i].score, insertItemsArray[i].val)
+				wg.Done()
+			}(i)
+		}
+	}
+	wg.Wait()
 }
 
 type insertItem struct {
@@ -48,8 +85,25 @@ func insertItems(length int) []insertItem {
 	return res
 }
 
+// Benchmarks.
+var benchArray = &benchArrayCache{}
+
+type benchArrayCache struct {
+	data []insertItem
+	mu   sync.Mutex
+}
+
+func (c *benchArrayCache) get() *[]insertItem {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.data == nil {
+		c.data = insertItems(10000000)
+	}
+	return &c.data
+}
+
 func BenchmarkSkipQueue_Insert(b *testing.B) {
-	insertItemsArray := insertItems(1000000)
+	insertItemsArray := *(benchArray.get())
 	s := NewDefault()
 	var i int
 	b.ResetTimer()
@@ -61,25 +115,11 @@ func BenchmarkSkipQueue_Insert(b *testing.B) {
 	})
 }
 
-func BenchmarkSkipQueue_DeleteMin(b *testing.B) {
-	insertItemsArray := insertItems(1000000)
-	s := NewDefault()
-	for i := 0; i < len(insertItemsArray); i++ {
-		s.Insert(insertItemsArray[i].score, insertItemsArray[i].val)
-	}
-	b.ResetTimer()
-	b.RunParallel(func(pb *testing.PB) {
-		for pb.Next() {
-			s.DeleteMin()
-		}
-	})
-}
-
 func BenchmarkSkipQueue_Insert_DeleteMin(b *testing.B) {
-	insertItemsArray := insertItems(1000000)
+	insertItemsArray := *(benchArray.get())
 	s := NewDefault()
 	var i int
-	for i < 1000 { // insert 1000 items before test
+	for i < 2500 { // insert 2500 items before test
 		s.Insert(insertItemsArray[i].score, insertItemsArray[i].val)
 		i++
 	}
